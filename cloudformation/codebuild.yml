@@ -1,0 +1,106 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CI/CD setup for containerized RAG Lambda
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: rag-lambda
+
+  CreateECR:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Whether to create the ECR repository
+
+Conditions:
+  CreateECRCondition: !Equals [!Ref CreateECR, "true"]
+
+Resources:
+
+  ### ECR Repository ###
+  RAGLambdaECR:
+    Type: AWS::ECR::Repository
+    Condition: CreateECRCondition
+    Properties:
+      RepositoryName: !Ref ProjectName
+
+  ### IAM Role for Lambda Execution ###
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-lambda-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - sagemaker:InvokeEndpoint
+                  - bedrock:InvokeModel
+                Resource: "*"
+
+  ### IAM Role for CodeBuild ###
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-codebuild-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - logs:*
+                  - lambda:UpdateFunctionCode
+                  - lambda:CreateFunction
+                  - lambda:UpdateFunctionConfiguration
+                  - iam:PassRole
+                Resource: "*"
+
+  ### CodeBuild Project ###
+  RAGCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-build
+      Source:
+        Type: GITHUB
+        Location: https://github.com/falia/Reg_Lambdas.git  # Change this
+        BuildSpec: buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:7.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_REGION
+            Value: !Ref "AWS::Region"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS

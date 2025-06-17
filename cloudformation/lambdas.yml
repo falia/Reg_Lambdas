@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup for containerized RAG Lambda (without CodeBuild)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: reg-lambda
+
+  CreateECR:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Whether to create the ECR repository
+
+  LambdaImageUri:
+    Type: String
+    Description: URI of the container image in ECR (e.g., 123456789012.dkr.ecr.eu-west-1.amazonaws.com/rag-lambda:latest)
+    Default: "661920085301.dkr.ecr.eu-west-1.amazonaws.com/rag-container:latest"
+
+Conditions:
+  CreateECRCondition: !Equals [!Ref CreateECR, "true"]
+
+Resources:
+
+  ### ECR Repository ###
+  RAGLambdaECR:
+    Type: AWS::ECR::Repository
+    Condition: CreateECRCondition
+    Properties:
+      RepositoryName: !Ref ProjectName
+
+  ### IAM Role for Lambda Execution ###
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-lambda-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - sagemaker:InvokeEndpoint
+                  - bedrock:InvokeModel
+                Resource: "*"
+
+  ### Lambda Function (Container Image) ###
+  RAGLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref ProjectName
+      Role: !GetAtt LambdaExecutionRole.Arn
+      PackageType: Image
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      Timeout: 30
+      MemorySize: 2048
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT_NAME: embedding-endpoint
+          MILVUS_HOST: 34.241.177.15
+          MILVUS_PORT: "19530"
+          MILVUS_COLLECTION: rag_collection
+          BEDROCK_REGION: eu-north-1
+          IRELAND_REGION: eu-west-1
+          VERSION_TIMESTAMP: "2025-06-17T15:30:00Z"

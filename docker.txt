@@ -1,0 +1,18 @@
+# Variables
+ACCOUNT_ID="661920085301"
+REGION="eu-west-1"
+REPO_NAME="rag-container"
+
+# Create the ECR repo if not done yet
+aws ecr create-repository --repository-name $REPO_NAME --region $REGION
+
+# Build and push the image
+docker build -t $REPO_NAME .
+docker tag $REPO_NAME:latest $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:latest
+
+aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com
+docker push $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:latest
+
+
+
+echo $ACCOUNT_ID.dkr.ecr.$REGION.amazonaws.com/$REPO_NAME:latest
