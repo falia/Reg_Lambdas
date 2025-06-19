@@ -25,8 +25,7 @@ class MilvusManager:
         try:
             connections.connect(
                 alias="default",
-                host=self.host,
-                port=self.port
+                uri=self.uri
             )
 
             # Verify connection

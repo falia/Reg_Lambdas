@@ -1,0 +1,227 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup for containerized RAG Lambda with API Gateway (without CodeBuild)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: reg-lambda
+
+  CreateECR:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: Whether to create the ECR repository
+
+  LambdaImageUri:
+    Type: String
+    Description: URI of the container image in ECR (e.g., 123456789012.dkr.ecr.eu-west-1.amazonaws.com/rag-lambda:latest)
+    Default: "661920085301.dkr.ecr.eu-west-1.amazonaws.com/rag-container:latest"
+
+  ApiGatewayStage:
+    Type: String
+    Default: "prod"
+    Description: API Gateway deployment stage
+
+  EnableCORS:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "true"
+    Description: Whether to enable CORS for the API
+
+Conditions:
+  CreateECRCondition: !Equals [!Ref CreateECR, "true"]
+  EnableCORSCondition: !Equals [!Ref EnableCORS, "true"]
+
+Resources:
+
+  ### ECR Repository ###
+  RAGLambdaECR:
+    Type: AWS::ECR::Repository
+    Condition: CreateECRCondition
+    Properties:
+      RepositoryName: !Ref ProjectName
+
+  ### IAM Role for Lambda Execution ###
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-lambda-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - sagemaker:InvokeEndpoint
+                  - bedrock:InvokeModel
+                Resource: "*"
+
+  ### Lambda Function (Container Image) ###
+  RAGLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref ProjectName
+      Role: !GetAtt LambdaExecutionRole.Arn
+      PackageType: Image
+      Code:
+        ImageUri: !Ref LambdaImageUri
+      Timeout: 30
+      MemorySize: 2048
+      Environment:
+        Variables:
+          SAGEMAKER_ENDPOINT_NAME: embedding-endpoint
+          MILVUS_HOST: 34.241.177.15
+          MILVUS_PORT: "19530"
+          MILVUS_COLLECTION: rag_collection
+          BEDROCK_REGION: eu-north-1
+          IRELAND_REGION: eu-west-1
+          VERSION_TIMESTAMP: "2025-06-17T15:30:00Z"
+
+  ### API Gateway REST API ###
+  RAGRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${ProjectName}-api
+      Description: REST API for RAG Lambda function
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: '*'
+
+  ### API Gateway Resource ###
+  RAGApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ParentId: !GetAtt RAGRestApi.RootResourceId
+      PathPart: query
+
+  ### API Gateway Method (POST) ###
+  RAGApiMethodPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ResourceId: !Ref RAGApiResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RAGLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: !If [EnableCORSCondition, "'*'", !Ref "AWS::NoValue"]
+            method.response.header.Access-Control-Allow-Headers: !If [EnableCORSCondition, "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'", !Ref "AWS::NoValue"]
+            method.response.header.Access-Control-Allow-Methods: !If [EnableCORSCondition, "'POST,OPTIONS'", !Ref "AWS::NoValue"]
+
+  ### API Gateway Method (GET) for health check ###
+  RAGApiMethodGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ResourceId: !Ref RAGApiResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RAGLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: !If [EnableCORSCondition, "'*'", !Ref "AWS::NoValue"]
+            method.response.header.Access-Control-Allow-Headers: !If [EnableCORSCondition, "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'", !Ref "AWS::NoValue"]
+            method.response.header.Access-Control-Allow-Methods: !If [EnableCORSCondition, "'GET,POST,OPTIONS'", !Ref "AWS::NoValue"]
+
+  ### CORS OPTIONS Method ###
+  RAGApiMethodOptions:
+    Type: AWS::ApiGateway::Method
+    Condition: EnableCORSCondition
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ResourceId: !Ref RAGApiResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+            ResponseTemplates:
+              application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  ### Lambda Permission for API Gateway ###
+  LambdaApiGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RAGLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RAGRestApi}/*/*
+
+  ### API Gateway Deployment ###
+  RAGApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - RAGApiMethodPost
+      - RAGApiMethodGet
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      StageName: !Ref ApiGatewayStage
+      Description: !Sub Deployment for ${ProjectName} API
+
+Outputs:
+  LambdaFunctionArn:
+    Description: ARN of the Lambda function
+    Value: !GetAtt RAGLambdaFunction.Arn
+    Export:
+      Name: !Sub ${ProjectName}-lambda-arn
+
+  ECRRepositoryUri:
+    Condition: CreateECRCondition
+    Description: URI of the ECR repository
+    Value: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${RAGLambdaECR}
+    Export:
+      Name: !Sub ${ProjectName}-ecr-uri
+
+  ApiGatewayUrl:
+    Description: URL of the API Gateway endpoint
+    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/query
+    Export:
+      Name: !Sub ${ProjectName}-api-url
+
+  RestApiId:
+    Description: ID of the REST API
+    Value: !Ref RAGRestApi
+    Export:
+      Name: !Sub ${ProjectName}-rest-api-id
