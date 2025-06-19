@@ -169,7 +169,7 @@ def rank_documents_by_relevance(query: str, documents: List[Document]) -> List[i
 
     try:
         ranking_response = llm.invoke(ranking_prompt)
-        logger.info(f"Ranking response: {ranking_response}")
+        logger.debug(f"Ranking response: {ranking_response}")
 
         ranked_indices = parse_ranking_response(ranking_response, len(documents))
         logger.info(f"Final ranking indices: {ranked_indices}")
@@ -208,16 +208,46 @@ def create_context_from_documents(documents: List[Document]) -> str:
     return "\n\n".join([doc.page_content for doc in documents])
 
 
-def create_final_prompt(query: str, context: str) -> str:
-    """Create the final prompt for answering the question"""
-    return f"""Based on the following context, please answer the question.
+def create_final_prompt(query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+    """Create the final prompt for answering the question with optional conversation history"""
 
-Context:
-{context}
+    prompt_parts = [
+        "You are a specialized assistant for Luxembourg and European financial regulations. "
+        "Your role is to provide accurate, compliance-focused answers based on official regulatory documents.",
+        "",
+        "IMPORTANT GUIDELINES:",
+        "- Base your answers strictly on the provided regulatory context",
+        "- If information is not available in the context, clearly state this limitation",
+        "- For regulatory requirements, cite specific articles, sections, or provisions when available",
+        "- Distinguish between EU-wide regulations and Luxembourg-specific requirements",
+        "- Use precise regulatory terminology (e.g., 'prospectus', 'competent authority', 'home Member State')",
+        "- If asked about compliance obligations, emphasize consulting official sources or legal counsel",
+        "- Do not provide general financial advice - focus on regulatory information only",
+        ""
+    ]
 
-Question: {query}
+    # Add conversation history if available
+    if history and len(history) > 0:
+        prompt_parts.append("Previous conversation context:")
+        for i, exchange in enumerate(history[-5:], 1):  # Last 5 exchanges
+            user_msg = exchange.get('user', exchange.get('question', ''))
+            assistant_msg = exchange.get('assistant', exchange.get('answer', ''))
+            if user_msg and assistant_msg:
+                prompt_parts.append(f"{i}. User: {user_msg}")
+                prompt_parts.append(f"   Assistant: {assistant_msg}")
+        prompt_parts.append("")
 
-Answer:"""
+    # Add current context and question
+    prompt_parts.extend([
+        "Regulatory Context:",
+        context,
+        "",
+        f"Question: {query}",
+        "",
+        "Answer (based on the regulatory context provided):"
+    ])
+
+    return "\n".join(prompt_parts)
 
 
 def extract_unique_source_urls(documents: List[Document]) -> List[str]:
@@ -229,13 +259,13 @@ def extract_unique_source_urls(documents: List[Document]) -> List[str]:
     })
 
 
-def generate_answer_with_llm(query: str, context: str) -> str:
-    """Generate final answer using LLM"""
+def generate_answer_with_llm(query: str, context: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+    """Generate final answer using LLM with optional conversation history"""
 
-    final_prompt = create_final_prompt(query, context)
+    final_prompt = create_final_prompt(query, context, history)
 
     logger.info("Generating final answer...")
-    logger.info(f"Final prompt: {final_prompt}")
+    logger.debug(f"Final prompt: {final_prompt[:500]}...")
 
     response = llm.invoke(final_prompt)
 
@@ -243,12 +273,56 @@ def generate_answer_with_llm(query: str, context: str) -> str:
     return extract_content_from_response(response)
 
 
-# =====================================================
-# ACTION PROCESSING FUNCTIONS
-# =====================================================
+def validate_history_format(history: List[Any]) -> List[Dict[str, str]]:
+    """Validate and normalize conversation history format"""
+    validated_history = []
 
-def process_query_action(query: str) -> Dict[str, Any]:
-    """Main function to process query action with document ranking"""
+    for exchange in history:
+        if isinstance(exchange, dict):
+            # Support multiple formats
+            user_msg = exchange.get('user') or exchange.get('question') or exchange.get('human')
+            assistant_msg = exchange.get('assistant') or exchange.get('answer') or exchange.get('ai')
+
+            if user_msg and assistant_msg:
+                validated_history.append({
+                    'user': str(user_msg),
+                    'assistant': str(assistant_msg)
+                })
+        elif isinstance(exchange, (list, tuple)) and len(exchange) >= 2:
+            # Support [user, assistant] format
+            validated_history.append({
+                'user': str(exchange[0]),
+                'assistant': str(exchange[1])
+            })
+
+    return validated_history
+
+    """Validate and normalize conversation history format"""
+    validated_history = []
+
+    for exchange in history:
+        if isinstance(exchange, dict):
+            # Support multiple formats
+            user_msg = exchange.get('user') or exchange.get('question') or exchange.get('human')
+            assistant_msg = exchange.get('assistant') or exchange.get('answer') or exchange.get('ai')
+
+            if user_msg and assistant_msg:
+                validated_history.append({
+                    'user': str(user_msg),
+                    'assistant': str(assistant_msg)
+                })
+        elif isinstance(exchange, (list, tuple)) and len(exchange) >= 2:
+            # Support [user, assistant] format
+            validated_history.append({
+                'user': str(exchange[0]),
+                'assistant': str(exchange[1])
+            })
+
+    return validated_history
+
+
+def process_query_action(query: str, history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    """Main function to process query action with document ranking and conversation history"""
 
     try:
         # Step 1: Retrieve similar documents
@@ -281,10 +355,9 @@ def process_query_action(query: str) -> Dict[str, Any]:
         # Step 4: Select top-ranked documents
         top_docs = select_top_documents(documents, ranked_indices, max_docs=10)
 
-        # Step 5: Create context and generate answer
+        # Step 5: Create context and generate answer with history
         context = create_context_from_documents(top_docs)
-
-        answer_text = generate_answer_with_llm(query, context)
+        answer_text = generate_answer_with_llm(query, context, history)
 
         # Step 6: Extract source URLs
         unique_urls = extract_unique_source_urls(top_docs)
@@ -415,6 +488,13 @@ def lambda_handler(event, context):
         body = json.loads(event.get('body', '{}'))
         query = body.get('query', '')
         action = body.get('action', 'query')
+        history = body.get('history', [])
+
+        # Validate and normalize history if provided
+        validated_history = []
+        if history and isinstance(history, list):
+            validated_history = validate_history_format(history)
+            logger.info(f"Processed {len(validated_history)} history exchanges")
 
         # Route to appropriate action
         if action == 'query':
@@ -430,7 +510,7 @@ def lambda_handler(event, context):
                         'success': False
                     })
                 }
-            return process_query_action(query)
+            return process_query_action(query, validated_history)
 
         elif action == 'add_documents':
             documents_data = body.get('documents', [])
@@ -541,11 +621,17 @@ if __name__ == "__main__":
     os.environ['BEDROCK_REGION'] = 'us-east-1'
     os.environ['IRELAND_REGION'] = 'eu-west-1'
 
-    # Test event
+    # Test event with history
     test_event = {
         "body": json.dumps({
-            "query": "What is a prospectus?",
-            "action": "query"
+            "query": "Where is it located?",
+            "action": "query",
+            "history": [
+                {
+                    "user": "What is CSSF?",
+                    "assistant": "The CSSF is the Luxembourgish financial regulatory authority, responsible for overseeing and regulating financial institutions, including investment firms, and ensuring their compliance with relevant EU and Luxembourg financial regulations."
+                }
+            ]
         })
     }
 

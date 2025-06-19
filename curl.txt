@@ -1,0 +1,1 @@
+curl -X POST "https://5zynd7e3e7.execute-api.eu-west-1.amazonaws.com/prod/query" -H "Content-Type: application/json" -d "{\"query\": \"What is a prospectus?\", \"action\": \"query\"}"
