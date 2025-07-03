@@ -1,7 +1,7 @@
 # Variables
-ACCOUNT_ID="661920085301"
-REGION="eu-west-1"
-REPO_NAME="rag-container"
+ACCOUNT_ID=661920085301
+REGION=eu-west-1
+REPO_NAME=rag-container
 
 # Create the ECR repo if not done yet
 aws ecr create-repository --repository-name $REPO_NAME --region $REGION

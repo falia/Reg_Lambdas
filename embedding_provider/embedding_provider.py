@@ -8,7 +8,6 @@ from langchain_community.embeddings import SagemakerEndpointEmbeddings
 from langchain_community.embeddings.sagemaker_endpoint import EmbeddingsContentHandler
 
 
-
 class EmbeddingProvider(ABC):
     @abstractmethod
     def get_embedding(self, text: str) -> List[float]:
@@ -38,8 +37,10 @@ class TEIContentHandler(EmbeddingsContentHandler):
         else:
             raise ValueError(f"Unexpected TEI response format: {type(response_json)}")
 
+
 class SageMakerEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, endpoint_name: str = 'embedding-endpoint', region_name: str = 'eu-west-1', use_tei: bool = True, max_batch_size: int = 8):
+    def __init__(self, endpoint_name: str = 'embedding-endpoint', region_name: str = 'eu-west-1', use_tei: bool = True,
+                 max_batch_size: int = 8):
         self.endpoint_name = endpoint_name
         self.region_name = region_name
         self.use_tei = use_tei
@@ -71,14 +72,14 @@ class EmbeddingService:
         self.use_remote = use_remote
 
         self.provider = SageMakerEmbeddingProvider(use_tei=use_tei, **kwargs)
-    
+
         self.milvus = None
         if milvus_config:
             from milvus_provider.mivlus_provider import MilvusManager
 
             host = milvus_config.get('host', 'localhost')
             port = milvus_config.get('port', '19530')
-            collection_name = milvus_config.get('collection_name', 'embeddings')
+            collection_name = milvus_config.get('collection_name', 'cssf_documents_final_final')
             connection_args = milvus_config.get('connection_args', {"host": host, "port": int(port)})
 
             self.milvus = MilvusManager(
@@ -136,6 +137,102 @@ class EmbeddingService:
         else:
             return self.milvus.similarity_search(query_text, top_k)
 
+    def search_by_metadata(self, **kwargs) -> List[Dict]:
+        """
+        Search documents by metadata fields.
+
+        Supported search parameters:
+        - document_type: exact match
+        - lang: exact match
+        - super_category: exact match
+        - entity: partial match in entities_text
+        - keyword: partial match in keywords_text
+        - theme: partial match in themes_text
+        - title_contains: partial match in title
+        - doc_id: exact match
+        - limit: number of results (default 100)
+
+        Returns:
+            List[Dict]: List of matching documents with their metadata
+
+        Raises:
+            Exception: If Milvus is not configured
+        """
+        if not self.milvus:
+            raise Exception("Milvus not configured")
+
+        return self.milvus.search_by_metadata(**kwargs)
+
+    def direct_query(self, query_expr: str, output_fields: List[str] = ["*"], limit: int = 1000) -> List[Dict]:
+        """
+        Perform direct query on Milvus collection using query expression
+
+        Args:
+            query_expr: Milvus query expression (e.g., 'document_type == "CSSF circular"')
+            output_fields: Fields to return in results
+            limit: Maximum number of results
+
+        Returns:
+            List[Dict]: Formatted results with content and metadata
+        """
+        if not self.milvus:
+            raise Exception("Milvus not configured")
+
+        try:
+            from pymilvus import Collection
+            collection = Collection(self.milvus.collection_name)
+
+            results = collection.query(
+                expr=query_expr,
+                output_fields=output_fields,
+                limit=limit
+            )
+
+            if results:
+                formatted_results = []
+                for result in results:
+                    doc = {
+                        'content': result.get('text', ''),
+                        'text': result.get('text', ''),
+                        'metadata': {
+                            'doc_id': result.get('doc_id', ''),
+                            'title': result.get('title', ''),
+                            'document_type': result.get('document_type', ''),
+                            'document_number': result.get('document_number', ''),
+                            'lang': result.get('lang', ''),
+                            'super_category': result.get('super_category', ''),
+                            'subtitle': result.get('subtitle', ''),
+                            'url': result.get('url', ''),
+                            'publication_date': result.get('publication_date', ''),
+                            'update_date': result.get('update_date', ''),
+                            'content_hash': result.get('content_hash', ''),
+                            'entities_text': result.get('entities_text', ''),
+                            'keywords_text': result.get('keywords_text', ''),
+                            'themes_text': result.get('themes_text', ''),
+                        }
+                    }
+                    formatted_results.append(doc)
+                return formatted_results
+            else:
+                return []
+
+        except Exception as e:
+            raise Exception(f"Direct query failed: {str(e)}")
+
+    def find_circular_by_number(self, document_type: str, document_number: str) -> List[Dict]:
+        """
+        Find circular documents by type and number using direct query
+
+        Args:
+            document_type: Type of document (e.g., "CSSF circular")
+            document_number: Document number (e.g., "CSSF 16-635")
+
+        Returns:
+            List[Dict]: List of matching document chunks
+        """
+        query_expr = f'document_type == "{document_type}" and document_number == "{document_number}"'
+        return self.direct_query(query_expr, limit=10000)
+
     def switch_provider(self, use_remote: bool, use_tei: bool = True, **kwargs):
         self.use_remote = use_remote
         if use_remote:
@@ -159,3 +256,41 @@ class EmbeddingService:
             port=port
         )
         self.milvus.create_collection(self.provider)
+
+
+# Example usage:
+if __name__ == "__main__":
+    # Initialize embedding service
+    embedding_service = EmbeddingService(
+        use_remote=True,
+        milvus_config={
+            'host': 'localhost',
+            'port': '19530',
+            'collection_name': 'cssf_documents_final_final'
+        },
+        use_tei=True,
+        endpoint_name='embedding-endpoint',
+        region_name='eu-west-1'
+    )
+
+    # Now you can use direct queries:
+
+    # Method 1: Generic direct query
+    results = embedding_service.direct_query(
+        query_expr='document_type == "CSSF circular" and document_number == "CSSF 16-635"',
+        limit=1000
+    )
+
+    # Method 2: Specific circular finder
+    results = embedding_service.find_circular_by_number(
+        document_type="CSSF circular",
+        document_number="CSSF 16-635"
+    )
+
+    # Method 3: Custom queries
+    results = embedding_service.direct_query(
+        query_expr='document_type == "CSSF circular" and lang == "en"',
+        limit=100
+    )
+
+    print(f"Found {len(results)} results")
