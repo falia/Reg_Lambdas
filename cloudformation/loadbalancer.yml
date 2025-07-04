@@ -91,8 +91,11 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
                   - dynamodb:UpdateItem
-                  - lambda:InvokeFunction
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}"
 
   ### Main Lambda Function (Container Image) ###
   RAGLambdaFunction:

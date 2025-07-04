@@ -33,34 +33,6 @@ llm = None
 embedding_service = None
 
 
-def format_chat_history(chat_history: List[Dict[str, str]]) -> str:
-    """Format chat history for inclusion in prompts"""
-    if not chat_history:
-        return ""
-
-    formatted_history = []
-    for message in chat_history[-5:]:  # Only include last 5 messages to avoid token limits
-        # Handle both formats: {"role": "user", "content": "..."} and {"user": "...", "assistant": "..."}
-        if 'role' in message and 'content' in message:
-            # Standard format
-            role = message.get('role', 'user')
-            content = message.get('content', '')
-            if role == 'user':
-                formatted_history.append(f"User: {content}")
-            elif role == 'assistant':
-                formatted_history.append(f"Assistant: {content}")
-        elif 'user' in message and 'assistant' in message:
-            # Your custom format
-            user_content = message.get('user', '')
-            assistant_content = message.get('assistant', '')
-            if user_content:
-                formatted_history.append(f"User: {user_content}")
-            if assistant_content:
-                formatted_history.append(f"Assistant: {assistant_content}")
-
-    return "\n".join(formatted_history)
-
-
 class CircularComparator:
     def __init__(self, embedding_service, llm):
         self.embedding_service = embedding_service
@@ -94,8 +66,8 @@ class CircularComparator:
 
                 type_match = (doc_type == "CSSF circular" or 'CSSF' in title or 'circular' in title.lower())
                 number_match = (
-                        doc_number == normalized_number or doc_id == normalized_number or normalized_number in title or normalized_number.replace(
-                    '-', '/') in title)
+                            doc_number == normalized_number or doc_id == normalized_number or normalized_number in title or normalized_number.replace(
+                        '-', '/') in title)
 
                 if type_match and number_match:
                     filtered_results.append(doc_content)
@@ -105,8 +77,7 @@ class CircularComparator:
         except Exception:
             return []
 
-    def process_comparison_query(self, query: str, chat_history: List[Dict[str, str]] = None, job_id: str = None) -> \
-    Dict[str, Any]:
+    def process_comparison_query(self, query: str, job_id: str = None) -> Dict[str, Any]:
         try:
             if job_id:
                 update_job_status(job_id, 'PROCESSING', progress='Extracting circular numbers from query...')
@@ -129,7 +100,7 @@ class CircularComparator:
                 update_job_status(job_id, 'PROCESSING',
                                   progress=f'Comparing {circular1_number} and {circular2_number}...')
 
-            comparison_result = self.compare_two_circulars(circular1_number, circular2_number, chat_history, job_id)
+            comparison_result = self.compare_two_circulars(circular1_number, circular2_number, job_id)
 
             if 'error' in comparison_result:
                 return {
@@ -163,8 +134,7 @@ class CircularComparator:
                 'success': False
             }
 
-    def compare_two_circulars(self, circular1_number: str, circular2_number: str,
-                              chat_history: List[Dict[str, str]] = None, job_id: str = None) -> Dict[str, Any]:
+    def compare_two_circulars(self, circular1_number: str, circular2_number: str, job_id: str = None) -> Dict[str, Any]:
         try:
             if job_id:
                 update_job_status(job_id, 'PROCESSING', progress=f'Finding circular {circular1_number}...')
@@ -200,17 +170,17 @@ class CircularComparator:
             if job_id:
                 update_job_status(job_id, 'PROCESSING', progress=f'Analyzing {title1}...')
 
-            analysis1 = self._analyze_circular_content(content1, title1, chat_history)
+            analysis1 = self._analyze_circular_content(content1, title1)
 
             if job_id:
                 update_job_status(job_id, 'PROCESSING', progress=f'Analyzing {title2}...')
 
-            analysis2 = self._analyze_circular_content(content2, title2, chat_history)
+            analysis2 = self._analyze_circular_content(content2, title2)
 
             if job_id:
                 update_job_status(job_id, 'PROCESSING', progress='Generating comparison...')
 
-            comparison_result = self._compare_analyses(analysis1, analysis2, title1, title2, chat_history)
+            comparison_result = self._compare_analyses(analysis1, analysis2, title1, title2)
 
             return {
                 'comparison': comparison_result,
@@ -316,20 +286,14 @@ class CircularComparator:
                 return metadata['title']
         return None
 
-    def _analyze_circular_content(self, content: str, title: str, chat_history: List[Dict[str, str]] = None) -> str:
+    def _analyze_circular_content(self, content: str, title: str) -> str:
         try:
             chunk_size = 1500
             chunks = [content[i:i + chunk_size] for i in range(0, len(content), chunk_size)]
             key_findings = []
 
-            # Format chat history for context
-            history_context = ""
-            if chat_history:
-                history_context = f"\n\nPrevious conversation context:\n{format_chat_history(chat_history)}\n"
-
             for i, chunk in enumerate(chunks[:3]):
-                prompt = f"""You are a specialized assistant for Luxembourg and European financial regulations.
-{history_context}
+                prompt = f"""
 Analyze this section of CSSF circular \"{title}\":
 
 {chunk}
@@ -348,8 +312,7 @@ Be concise (max 3 bullet points):
                 except Exception:
                     continue
 
-            synthesis_prompt = f"""You are a specialized assistant for Luxembourg and European financial regulations.
-{history_context}
+            synthesis_prompt = f"""
 Summarize the key aspects of circular \"{title}\" based on these analyses:
 
 {chr(10).join(key_findings)}
@@ -367,38 +330,31 @@ Limit to 200 words.
         except Exception:
             return f"Analysis failed for {title}"
 
-    def _compare_analyses(self, analysis1: str, analysis2: str, title1: str, title2: str,
-                          chat_history: List[Dict[str, str]] = None) -> str:
-        # Format chat history for context
-        history_context = ""
-        if chat_history:
-            history_context = f"\n\nPrevious conversation context:\n{format_chat_history(chat_history)}\n"
+    def _compare_analyses(self, analysis1: str, analysis2: str, title1: str, title2: str) -> str:
+        prompt = f"""
+        Compare these two CSSF circulars and return a structured JSON response with these fields:
 
-        prompt = f"""You are a specialized assistant for Luxembourg and European financial regulations.
-{history_context}
-Compare these two CSSF circulars and return a structured JSON response with these fields:
+        - purpose_and_scope
+        - key_differences
+        - timeline_and_amendments
+        - institutional_impact
+        - recommendations
 
-- purpose_and_scope
-- key_differences
-- timeline_and_amendments
-- institutional_impact
-- recommendations
+        Use this format:
+        {{
+          "purpose_and_scope": "...",
+          "key_differences": "...",
+          "timeline_and_amendments": "...",
+          "institutional_impact": "...",
+          "recommendations": "..."
+        }}
 
-Use this format:
-{{
-  "purpose_and_scope": "...",
-  "key_differences": "...",
-  "timeline_and_amendments": "...",
-  "institutional_impact": "...",
-  "recommendations": "..."
-}}
+        **{title1} Analysis:**
+        {analysis1}
 
-**{title1} Analysis:**
-{analysis1}
-
-**{title2} Analysis:**
-{analysis2}
-"""
+        **{title2} Analysis:**
+        {analysis2}
+        """
 
         response = self.llm.invoke(prompt)
         return extract_content_from_response(response)
@@ -569,17 +525,9 @@ def convert_to_langchain_documents(similar_docs: List[Any]) -> List[Document]:
     return documents
 
 
-def rank_documents_by_relevance(query: str, documents: List[Document], chat_history: List[Dict[str, str]] = None) -> \
-List[int]:
-    """Get document ranking from LLM with chat history context"""
-    # Format chat history for context
-    history_context = ""
-    if chat_history:
-        history_context = f"\n\nPrevious conversation context:\n{format_chat_history(chat_history)}\n"
-
-    ranking_prompt = f"""You are a specialized assistant for Luxembourg and European financial regulations.
-{history_context}
-Rank these document snippets by relevance to: {query}
+def rank_documents_by_relevance(query: str, documents: List[Document]) -> List[int]:
+    """Get document ranking from LLM"""
+    ranking_prompt = f"""Rank these document snippets by relevance to: {query}
 
 Return ONLY a JSON array like: [3, 1, 7, 2, 5]
 
@@ -603,7 +551,7 @@ Snippets:
 
 
 def process_rag_query(job_id: str, request_body: Dict[str, Any]) -> None:
-    """Process the RAG query with chat history support"""
+    """Process the RAG query with your existing logic"""
     try:
         # Initialize services
         initialize_services()
@@ -614,7 +562,6 @@ def process_rag_query(job_id: str, request_body: Dict[str, Any]) -> None:
         query = request_body.get('query', '')
         max_results = request_body.get('max_results', 20)
         threshold = request_body.get('threshold', 0.7)
-        chat_history = request_body.get('history', [])  # Changed from 'chat_history' to 'history'
 
         # Check if this is a comparison query
         query_lower = query.lower()
@@ -622,17 +569,17 @@ def process_rag_query(job_id: str, request_body: Dict[str, Any]) -> None:
         is_comparison = any(keyword in query_lower for keyword in comparison_keywords)
 
         if is_comparison:
-            # Process comparison query with chat history
+            # Process comparison query
             update_job_status(job_id, 'PROCESSING', progress='Processing comparison query...')
 
             comparator = CircularComparator(embedding_service, llm)
-            result = comparator.process_comparison_query(query, chat_history, job_id)
+            result = comparator.process_comparison_query(query, job_id)
 
             # Update job status to completed
             update_job_status(job_id, 'COMPLETED', result=result)
 
         else:
-            # Process regular RAG query with chat history
+            # Process regular RAG query
             update_job_status(job_id, 'PROCESSING', progress='Searching for relevant documents...')
 
             similar_docs = embedding_service.search_similar_texts(
@@ -654,7 +601,7 @@ def process_rag_query(job_id: str, request_body: Dict[str, Any]) -> None:
 
             update_job_status(job_id, 'PROCESSING', progress='Ranking documents by relevance...')
 
-            ranked_indices = rank_documents_by_relevance(query, documents, chat_history)
+            ranked_indices = rank_documents_by_relevance(query, documents)
 
             # Select top documents
             top_docs = []
@@ -668,15 +615,10 @@ def process_rag_query(job_id: str, request_body: Dict[str, Any]) -> None:
 
             context = "\n\n".join([doc.page_content for doc in top_docs])
 
-            # Format chat history for the final prompt
-            history_context = ""
-            if chat_history:
-                history_context = f"\n\nPrevious conversation context:\n{format_chat_history(chat_history)}\n"
-
-            # Generate answer with chat history context
+            # Generate answer
             final_prompt = f"""You are a specialized assistant for Luxembourg and European financial regulations.
 Base your answers on the provided regulatory context.
-{history_context}
+
 Context:
 {context}
 
@@ -832,10 +774,6 @@ def handle_query_submission(event: Dict[str, Any]) -> Dict[str, Any]:
             job_item['threshold'] = Decimal(str(body['threshold']))
         if 'action' in body:
             job_item['action'] = body['action']
-        if 'chat_history' in body:
-            job_item['chatHistory'] = body['chat_history']  # Store chat history
-        if 'history' in body:
-            job_item['history'] = body['history']  # Store history in your format
 
         # Store job in DynamoDB
         if job_table:
@@ -1132,54 +1070,32 @@ if __name__ == "__main__":
     os.environ['JOB_STATUS_TABLE'] = 'test-job-status'
     os.environ['AWS_LAMBDA_FUNCTION_NAME'] = 'test-function'
 
-    # Test comparison query with your history format
+    # Test comparison query
     test_event = {
         "httpMethod": "POST",
         "path": "/query",
         "body": json.dumps({
-            "query": "summerize: CSSF 11/513",
-            "action": "query",
-            "history": [
-                {
-                    "user": "list some circulars",
-                    "assistant": " Here are some circulars mentioned in the provided regulatory context:\n\n1. CSSF 07/316\n2. CSSF 07/331\n3. IML 93/104\n4. CSSF 14/593\n5. CSSF 14/587\n6. CSSF 22/819\n7. CSSF 22/805\n8. CSSF 12/552\n9. CSSF 10/453\n10. CSSF 14/586\n11. CSSF 13/570\n12. CSSF 11/513\n13. CSSF 10/461\n14. CSSF 08/344\n15. CSSF 08/381\n16. CSSF 10/450\n17. CSSF 10/493"
-                },
-                {
-                    "user": "summerize CSSF 10/493",
-                    "assistant": " There is no CSSF 10/493 in the provided context."
-                }
-            ],
-            "max_results": 20,
-            "threshold": 0.7
+            "query": "compare circular 16/635 and circular 12/539",
+            "action": "query"
         })
     }
 
     result = lambda_handler(test_event, None)
-    print("Query submission result with your history format:")
+    print("Query submission result:")
     print(json.dumps(result, indent=2))
 
-    # Test regular query with your history format
+    # Test regular query
     test_event_regular = {
         "httpMethod": "POST",
         "path": "/query",
         "body": json.dumps({
-            "query": "What are the latest updates on risk management requirements?",
-            "max_results": 10,
-            "history": [
-                {
-                    "user": "What are CSSF circulars?",
-                    "assistant": "CSSF circulars are regulatory guidelines issued by the Luxembourg financial supervisor..."
-                },
-                {
-                    "user": "How often are they updated?",
-                    "assistant": "CSSF circulars are updated as needed when regulatory requirements change..."
-                }
-            ]
+            "query": "What are the requirements for risk management?",
+            "max_results": 10
         })
     }
 
     result_regular = lambda_handler(test_event_regular, None)
-    print("\nRegular query submission result with your history format:")
+    print("\nRegular query submission result:")
     print(json.dumps(result_regular, indent=2))
 
     # Test health check
