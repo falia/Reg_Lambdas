@@ -21,68 +21,39 @@ class CircularComparator:
 
     def find_circular_by_number(self, circular_number: str) -> List[Dict]:
         """Find all chunks for a specific circular using direct metadata search"""
-        try:
-            normalized_number = self._normalize_circular_number(circular_number)
 
-            try:
-                from pymilvus import Collection
-                collection = Collection(self.embedding_service.milvus.collection_name)
-                query_expr = f'document_type == "CSSF circular" and document_number == "{normalized_number}"'
+        normalized_number = self._normalize_circular_number(circular_number)
 
-                results = collection.query(
-                    expr=query_expr,
-                    output_fields=["*"],
-                    limit=10000
-                )
+        from pymilvus import Collection
 
-                if results:
-                    formatted_results = []
-                    for result in results:
-                        doc = {
-                            'content': result.get('text', ''),
-                            'text': result.get('text', ''),
-                            'metadata': {
-                                'doc_id': result.get('doc_id', ''),
-                                'title': result.get('title', ''),
-                                'document_type': result.get('document_type', ''),
-                                'document_number': result.get('document_number', ''),
-                                'lang': result.get('lang', ''),
-                                'url': result.get('url', ''),
-                                'publication_date': result.get('publication_date', ''),
-                            }
-                        }
-                        formatted_results.append(doc)
-                    return formatted_results
-                else:
-                    return []
+        collection = Collection(self.embedding_service.milvus.collection_name)
+        query_expr = f'document_type == "CSSF circular" and document_number == "{normalized_number}"'
 
-            except Exception:
-                # Fallback to semantic search + filtering
-                results = self.embedding_service.search_similar_texts(
-                    query_text=f"CSSF circular {normalized_number}",
-                    top_k=200,
-                    with_scores=True
-                )
+        results = collection.query(
+            expr=query_expr,
+            output_fields=["*"],
+            limit=10000
+        )
 
-                filtered_results = []
-                for doc_data in results:
-                    if isinstance(doc_data, tuple):
-                        doc_content, score = doc_data
-                    else:
-                        doc_content = doc_data
-
-                    metadata = doc_content.get('metadata', {})
-                    doc_type = metadata.get('document_type', '')
-                    doc_number = metadata.get('document_number', '')
-                    title = metadata.get('title', '')
-
-                    if (doc_type == "CSSF circular" and
-                            (doc_number == normalized_number or normalized_number in title)):
-                        filtered_results.append(doc_content)
-
-                return filtered_results
-
-        except Exception:
+        if results:
+            formatted_results = []
+            for result in results:
+                doc = {
+                    'content': result.get('text', ''),
+                    'text': result.get('text', ''),
+                    'metadata': {
+                        'doc_id': result.get('doc_id', ''),
+                        'title': result.get('title', ''),
+                        'document_type': result.get('document_type', ''),
+                        'document_number': result.get('document_number', ''),
+                        'lang': result.get('lang', ''),
+                        'url': result.get('url', ''),
+                        'publication_date': result.get('publication_date', ''),
+                    }
+                }
+                formatted_results.append(doc)
+            return formatted_results
+        else:
             return []
 
     def _normalize_circular_number(self, circular_number: str) -> str:
@@ -175,14 +146,6 @@ class CircularComparator:
         return None
 
     def _generate_comparison(self, content1: str, content2: str, title1: str, title2: str) -> str:
-        """Generate comparison using LLM"""
-        try:
-            # Test basic connectivity first
-            basic_response = self.llm.invoke("Say 'Test successful'")
-            basic_content = extract_content_from_response(basic_response)
-
-            if not basic_content.strip():
-                return self._generate_fallback_comparison(content1, content2, title1, title2)
 
             # Try structured comparison
             content_prompt = f"""
@@ -204,43 +167,9 @@ class CircularComparator:
             content_response = self.llm.invoke(content_prompt)
             content_result = extract_content_from_response(content_response)
 
-            if content_result.strip() and len(content_result) > 50:
-                return content_result
-            else:
-                return self._generate_fallback_comparison(content1, content2, title1, title2)
+            return content_result
 
-        except Exception:
-            return self._generate_fallback_comparison(content1, content2, title1, title2)
 
-    def _generate_fallback_comparison(self, content1: str, content2: str, title1: str, title2: str) -> str:
-        """Generate a fallback comparison when LLM fails"""
-        content1_words = len(content1.split())
-        content2_words = len(content2.split())
-
-        return f"""
-## Circular Comparison: {title1} vs {title2}
-
-### Document Analysis
-- **{title1}**: {content1_words} words
-- **{title2}**: {content2_words} words
-
-### Basic Observations
-- Circular 1 appears to be {"longer" if content1_words > content2_words else "shorter"} than Circular 2
-- Both circulars contain regulatory language and compliance requirements
-
-### Content Preview
-**From {title1}:**
-{content1[:300]}...
-
-**From {title2}:**
-{content2[:300]}...
-
-### Recommendation
-For a detailed regulatory analysis, please:
-1. Review the full circular documents directly
-2. Consult with legal or compliance professionals
-3. Check the CSSF website for the most current versions
-"""
 
     def process_comparison_query(self, query: str) -> Dict[str, Any]:
         """Main method to process circular comparison queries"""
@@ -317,7 +246,7 @@ def initialize_services():
         milvus_config = {
             'host': os.environ['MILVUS_HOST'],
             'port': int(os.environ['MILVUS_PORT']),
-            'collection_name': os.environ.get('MILVUS_COLLECTION', 'rag_collection'),
+            'collection_name': os.environ.get('MILVUS_COLLECTION', 'cssf_documents_final_final'),
             'connection_args': {
                 "host": os.environ['MILVUS_HOST'],
                 "port": int(os.environ['MILVUS_PORT'])

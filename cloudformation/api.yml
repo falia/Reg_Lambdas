@@ -83,7 +83,7 @@ Resources:
           SAGEMAKER_ENDPOINT_NAME: embedding-endpoint
           MILVUS_HOST: 34.241.177.15
           MILVUS_PORT: "19530"
-          MILVUS_COLLECTION: cssf_documents
+          MILVUS_COLLECTION: cssf_documents_final_final
           BEDROCK_REGION: us-east-1
           IRELAND_REGION: eu-west-1
           VERSION_TIMESTAMP: "2025-06-17T15:30:00Z"
