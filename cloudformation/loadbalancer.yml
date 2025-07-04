@@ -1,10 +1,10 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Setup for containerized RAG Lambda with API Gateway (without CodeBuild)
+Description: Setup for containerized RAG Lambda with API Gateway (Async Processing)
 
 Parameters:
   ProjectName:
     Type: String
-    Default: reg-lambda
+    Default: rag-lambda
 
   CreateECR:
     Type: String
@@ -28,6 +28,11 @@ Parameters:
     Default: "true"
     Description: Whether to enable CORS for the API
 
+  JobTTLHours:
+    Type: Number
+    Default: 24
+    Description: Hours to keep job results in DynamoDB
+
 Conditions:
   CreateECRCondition: !Equals [!Ref CreateECR, "true"]
   EnableCORSCondition: !Equals [!Ref EnableCORS, "true"]
@@ -40,6 +45,24 @@ Resources:
     Condition: CreateECRCondition
     Properties:
       RepositoryName: !Ref ProjectName
+
+  ### DynamoDB Table for Job Status ###
+  JobStatusTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${ProjectName}-job-status
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
 
   ### IAM Role for Lambda Execution ###
   LambdaExecutionRole:
@@ -65,9 +88,13 @@ Resources:
                   - logs:PutLogEvents
                   - sagemaker:InvokeEndpoint
                   - bedrock:InvokeModel
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - lambda:InvokeFunction
                 Resource: "*"
 
-  ### Lambda Function (Container Image) ###
+  ### Main Lambda Function (Container Image) ###
   RAGLambdaFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -87,13 +114,15 @@ Resources:
           BEDROCK_REGION: us-east-1
           IRELAND_REGION: eu-west-1
           VERSION_TIMESTAMP: "2025-06-17T15:30:00Z"
+          JOB_STATUS_TABLE: !Ref JobStatusTable
+          JOB_TTL_HOURS: !Ref JobTTLHours
 
   ### API Gateway REST API ###
   RAGRestApi:
     Type: AWS::ApiGateway::RestApi
     Properties:
       Name: !Sub ${ProjectName}-api
-      Description: REST API for RAG Lambda function
+      Description: REST API for RAG Lambda function with async processing
       EndpointConfiguration:
         Types:
           - REGIONAL
@@ -105,7 +134,7 @@ Resources:
             Action: execute-api:Invoke
             Resource: '*'
 
-  ### API Gateway Resource ###
+  ### API Gateway Resource for Query ###
   RAGApiResource:
     Type: AWS::ApiGateway::Resource
     Properties:
@@ -113,7 +142,23 @@ Resources:
       ParentId: !GetAtt RAGRestApi.RootResourceId
       PathPart: query
 
-  ### API Gateway Method (POST) ###
+  ### API Gateway Resource for Status ###
+  StatusApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ParentId: !GetAtt RAGRestApi.RootResourceId
+      PathPart: status
+
+  ### API Gateway Resource for Status with JobId ###
+  StatusJobApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ParentId: !Ref StatusApiResource
+      PathPart: "{jobId}"
+
+  ### API Gateway Method (POST) for Query Submission ###
   RAGApiMethodPost:
     Type: AWS::ApiGateway::Method
     Properties:
@@ -132,12 +177,12 @@ Resources:
             method.response.header.Access-Control-Allow-Headers: !If [EnableCORSCondition, "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'", !Ref "AWS::NoValue"]
             method.response.header.Access-Control-Allow-Methods: !If [EnableCORSCondition, "'POST,OPTIONS'", !Ref "AWS::NoValue"]
 
-  ### API Gateway Method (GET) for health check ###
-  RAGApiMethodGet:
+  ### API Gateway Method (GET) for Status Check ###
+  StatusApiMethodGet:
     Type: AWS::ApiGateway::Method
     Properties:
       RestApiId: !Ref RAGRestApi
-      ResourceId: !Ref RAGApiResource
+      ResourceId: !Ref StatusJobApiResource
       HttpMethod: GET
       AuthorizationType: NONE
       Integration:
@@ -149,9 +194,33 @@ Resources:
           ResponseParameters:
             method.response.header.Access-Control-Allow-Origin: !If [EnableCORSCondition, "'*'", !Ref "AWS::NoValue"]
             method.response.header.Access-Control-Allow-Headers: !If [EnableCORSCondition, "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'", !Ref "AWS::NoValue"]
-            method.response.header.Access-Control-Allow-Methods: !If [EnableCORSCondition, "'GET,POST,OPTIONS'", !Ref "AWS::NoValue"]
+            method.response.header.Access-Control-Allow-Methods: !If [EnableCORSCondition, "'GET,OPTIONS'", !Ref "AWS::NoValue"]
 
-  ### CORS OPTIONS Method ###
+  ### API Gateway Method (GET) for Health Check ###
+  HealthApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ParentId: !GetAtt RAGRestApi.RootResourceId
+      PathPart: health
+
+  HealthApiMethodGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ResourceId: !Ref HealthApiResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RAGLambdaFunction.Arn}/invocations
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: !If [EnableCORSCondition, "'*'", !Ref "AWS::NoValue"]
+
+  ### CORS OPTIONS Methods ###
   RAGApiMethodOptions:
     Type: AWS::ApiGateway::Method
     Condition: EnableCORSCondition
@@ -167,7 +236,35 @@ Resources:
             ResponseParameters:
               method.response.header.Access-Control-Allow-Origin: "'*'"
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            ResponseTemplates:
+              application/json: ''
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+
+  StatusApiMethodOptions:
+    Type: AWS::ApiGateway::Method
+    Condition: EnableCORSCondition
+    Properties:
+      RestApiId: !Ref RAGRestApi
+      ResourceId: !Ref StatusJobApiResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
             ResponseTemplates:
               application/json: ''
         PassthroughBehavior: WHEN_NO_MATCH
@@ -194,7 +291,8 @@ Resources:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - RAGApiMethodPost
-      - RAGApiMethodGet
+      - StatusApiMethodGet
+      - HealthApiMethodGet
     Properties:
       RestApiId: !Ref RAGRestApi
       StageName: !Ref ApiGatewayStage
@@ -215,10 +313,28 @@ Outputs:
       Name: !Sub ${ProjectName}-ecr-uri
 
   ApiGatewayUrl:
-    Description: URL of the API Gateway endpoint
-    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/query
+    Description: Base URL of the API Gateway endpoint
+    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}
     Export:
       Name: !Sub ${ProjectName}-api-url
+
+  QueryEndpoint:
+    Description: URL for submitting queries
+    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/query
+
+  StatusEndpoint:
+    Description: URL for checking job status
+    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/status/{jobId}
+
+  HealthEndpoint:
+    Description: URL for health checks
+    Value: !Sub https://${RAGRestApi}.execute-api.${AWS::Region}.amazonaws.com/${ApiGatewayStage}/health
+
+  JobStatusTableName:
+    Description: Name of the DynamoDB table for job status
+    Value: !Ref JobStatusTable
+    Export:
+      Name: !Sub ${ProjectName}-job-status-table
 
   RestApiId:
     Description: ID of the REST API
